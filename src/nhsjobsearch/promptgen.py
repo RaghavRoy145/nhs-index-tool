@@ -155,6 +155,8 @@ answer covers, and any gaps the applicant should be aware of]
 
 - Write in the **first person** as the applicant. Do not refer to "the \
 candidate" — use "I".
+- Only output the answers one question at a time, after the user has \
+read the response and approved. Do not write all answers in one go.
 - Be **specific and evidence-based**. Vague claims like "I am a team \
 player" must be backed by a concrete example from the CV.
 - **Do not fabricate** experience, qualifications, or events. Only use \
