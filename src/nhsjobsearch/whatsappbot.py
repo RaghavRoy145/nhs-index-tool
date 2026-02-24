@@ -41,6 +41,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from . import config, database
 from .nhsconnector import NHSJobsConnector
 from .dwpconnector import DWPJobsConnector
+from .indeedconnector import IndeedConnector
 from .cronreindex import write_notifications
 
 logger = logging.getLogger('nhsjobsearch.whatsapp')
@@ -48,6 +49,7 @@ logger = logging.getLogger('nhsjobsearch.whatsapp')
 CONNECTOR_MAP = {
     'nhs': NHSJobsConnector,
     'dwp': DWPJobsConnector,
+    'indeed': IndeedConnector,
 }
 
 # ─── Twilio sender (uses requests directly — no SDK dependency) ───

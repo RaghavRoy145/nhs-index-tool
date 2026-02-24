@@ -36,10 +36,12 @@ from logging.handlers import RotatingFileHandler
 from . import config, database
 from .nhsconnector import NHSJobsConnector
 from .dwpconnector import DWPJobsConnector
+from .indeedconnector import IndeedConnector
 
 CONNECTOR_MAP = {
     'nhs': NHSJobsConnector,
     'dwp': DWPJobsConnector,
+    'indeed': IndeedConnector,
 }
 
 # --- File paths derived from config cache dir ---

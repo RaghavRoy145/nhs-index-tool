@@ -14,9 +14,15 @@ SOURCES = {
         'url': 'https://findajob.dwp.gov.uk/search',
         'name': 'Find a Job',
     },
+    'IndeedUK': {
+        'type': 'indeed',
+        'url': 'https://uk.indeed.com/jobs',
+        'name': 'Indeed UK',
+    },
 }
 
 CONFIG = ConfigParser()
+CONFIG_PATH = None
 VERBOSE = False
 
 
@@ -58,6 +64,15 @@ def verify_defaults():
     check_value('SEARCH_DWP', 'pages_to_fetch', '5')
     check_value('SEARCH_DWP', 'sort_by', 'Most recent')
 
+    # Indeed UK search defaults
+    check_value('SEARCH_INDEED', 'keyword', '')
+    check_value('SEARCH_INDEED', 'location', '')
+    check_value('SEARCH_INDEED', 'radius', '')        # miles from location
+    check_value('SEARCH_INDEED', 'job_type', '')       # fulltime / parttime / contract / temporary
+    check_value('SEARCH_INDEED', 'max_days_old', '')   # 1, 3, 7, 14 — only show jobs posted within N days
+    check_value('SEARCH_INDEED', 'sort_by', 'date')    # date / relevance
+    check_value('SEARCH_INDEED', 'pages_to_fetch', '5')
+
     if not any(s for s in CONFIG.sections() if s.startswith('SOURCE')):
         for k, v in SOURCES.items():
             CONFIG['SOURCE:' + k] = v
@@ -68,7 +83,9 @@ def verify_defaults():
 
 def init_config(in_path):
     """Initialize configuration from file, creating defaults if needed."""
+    global CONFIG_PATH
     config_path = path.abspath(path.expanduser(in_path))
+    CONFIG_PATH = config_path
     os.makedirs(path.dirname(config_path), exist_ok=True)
     CONFIG.read(config_path)
     verify_defaults()

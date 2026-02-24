@@ -466,6 +466,7 @@ ACTIONS:
                         from .promptgen import run_prompt_generator
                         from .nhsconnector import NHSJobsConnector
                         from .dwpconnector import DWPJobsConnector
+                        from .indeedconnector import IndeedConnector
 
                         # Fetch full job description
                         print(f"\nFetching full description for: {job.title}...")
@@ -476,6 +477,11 @@ ACTIONS:
                         elif job.source == 'dwp':
                             connector = DWPJobsConnector()
                             detail = connector.get_job_detail(job.url)
+                        elif job.source == 'indeed':
+                            connector = IndeedConnector()
+                            jd_text = connector.fetch_job_detail(job.url)
+                            if jd_text:
+                                detail = {'description': jd_text}
 
                         if detail and detail.get('description'):
                             jd = detail['description']

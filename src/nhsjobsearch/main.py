@@ -1,5 +1,6 @@
 from .nhsconnector import NHSJobsConnector
 from .dwpconnector import DWPJobsConnector
+from .indeedconnector import IndeedConnector
 from optparse import OptionParser
 from . import config, database, display
 import os
@@ -8,6 +9,7 @@ import os
 CONNECTOR_MAP = {
     'nhs': NHSJobsConnector,
     'dwp': DWPJobsConnector,
+    'indeed': IndeedConnector,
 }
 
 
@@ -23,6 +25,8 @@ def get_opts():
     parse.add_option("--reindex-nhs", help="Re-index NHS Jobs only",
                      action="store_true", default=False)
     parse.add_option("--reindex-dwp", help="Re-index DWP Find a Job only",
+                     action="store_true", default=False)
+    parse.add_option("--reindex-indeed", help="Re-index Indeed UK only",
                      action="store_true", default=False)
     parse.add_option("--purge", help="Remove expired job listings",
                      action="store_true", default=False)
@@ -56,6 +60,16 @@ def get_opts():
                      action="store_true", default=False)
     parse.add_option("--bot-digest", help="Force send morning digest now",
                      action="store_true", default=False)
+
+    # Subscriptions
+    parse.add_option("--subscribe", help="Subscribe to a keyword (e.g. 'assistant psychologist')",
+                     dest='subscribe', default=None)
+    parse.add_option("--unsubscribe", help="Unsubscribe from a keyword",
+                     dest='unsubscribe', default=None)
+    parse.add_option("--subscriptions", help="List active subscriptions",
+                     action="store_true", default=False)
+    parse.add_option("--source", help="Source filter for --subscribe (nhs, dwp, or nhs,dwp)",
+                     dest='source_filter', default=None)
 
     return parse.parse_args()
 
@@ -130,11 +144,13 @@ def show_stats(db_path):
     total = database.get_job_count(db_path)
     nhs = database.get_job_count(db_path, source='nhs')
     dwp = database.get_job_count(db_path, source='dwp')
+    indeed = database.get_job_count(db_path, source='indeed')
 
     print(f"Job Index Statistics:")
     print(f"  Total jobs:    {total}")
     print(f"  NHS Jobs:      {nhs}")
     print(f"  DWP Find a Job:{dwp}")
+    print(f"  Indeed UK:     {indeed}")
 
 
 def run_tool():
@@ -195,6 +211,12 @@ def run_tool():
                 reindex_source(db_path, 'dwp', dict(config.CONFIG[section]))
         needs_reindex = True
 
+    elif opts.reindex_indeed:
+        for section in config.CONFIG.sections():
+            if section.startswith('SOURCE') and config.CONFIG.get(section, 'type', fallback='') == 'indeed':
+                reindex_source(db_path, 'indeed', dict(config.CONFIG[section]))
+        needs_reindex = True
+
     # Auto-index if DB doesn't exist
     if not os.path.exists(db_path):
         print("No index found. Running first-time indexing...")
@@ -205,6 +227,22 @@ def run_tool():
     if opts.search_query:
         quick_search(db_path, opts.search_query, opts.location, opts.num_results)
         return
+
+    # Subscription management
+    # if opts.subscribe:
+    #     from .subscriptions import cli_subscribe
+    #     cli_subscribe(opts.subscribe, opts.source_filter)
+    #     return
+
+    # if opts.unsubscribe:
+    #     from .subscriptions import cli_unsubscribe
+    #     cli_unsubscribe(opts.unsubscribe)
+    #     return
+
+    # if opts.subscriptions:
+    #     from .subscriptions import show_subscriptions
+    #     show_subscriptions()
+    #     return
 
     # WhatsApp bot commands
     if opts.bot:
@@ -229,7 +267,7 @@ def run_tool():
         return
 
     # Interactive TUI
-    if not (opts.reindex or opts.reindex_nhs or opts.reindex_dwp):
+    if not (opts.reindex or opts.reindex_nhs or opts.reindex_dwp or opts.reindex_indeed):
         display.show_display(db_path)
 
 
