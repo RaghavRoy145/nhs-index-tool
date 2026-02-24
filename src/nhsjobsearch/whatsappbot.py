@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 """
-WhatsApp notification bot for NHS/DWP job search.
+WhatsApp notification bot for NHS/DWP/Indeed job search.
 
 Lightweight daemon that:
-  1. Reindexes all sources on schedule (default: 08:00 and 16:00)
-  2. Sends a morning digest at 09:00 (always, even if no new jobs)
-  3. Sends an afternoon alert at 16:05 (only if new jobs since morning)
-  4. Uses Twilio WhatsApp API for outbound messages — no Flask/ngrok needed
+  1. Reindexes all sources at regular intervals (default: every 6 hours)
+  2. Sends a morning digest at the first slot (always, even if no new jobs)
+  3. Sends interval alerts at subsequent slots (only if new jobs found)
+  4. Splits long messages across multiple WhatsApp messages
+  5. Uses Twilio WhatsApp API for outbound messages — no Flask/ngrok needed
 
-Run as:
-    python -m nhsjobsearch.whatsappbot
-
-Or install as a system service.
+Default schedule (interval_hours=6, morning_time=08:00):
+  08:00 → reindex → 08:05  morning digest (always sent)
+  14:00 → reindex → 14:05  interval alert (only if new jobs)
+  20:00 → reindex → 20:05  interval alert (only if new jobs)
+  02:00 → reindex → 02:05  interval alert (only if new jobs)
 
 Config in ~/.config/nhs-job-search/config.ini:
 
@@ -20,9 +22,9 @@ Config in ~/.config/nhs-job-search/config.ini:
     twilio_auth_token  = xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
     twilio_from        = whatsapp:+14155238886
     notify_to          = whatsapp:+447xxxxxxxxx
-    reindex_times      = 08:00, 16:00
-    notify_morning     = 09:00
-    notify_afternoon_delay_minutes = 5
+    interval_hours     = 6
+    morning_time       = 08:00
+    notify_delay_minutes = 5
     enabled            = true
 """
 
@@ -92,6 +94,21 @@ def send_whatsapp(body, to=None):
         return None
 
 
+def send_whatsapp_multi(messages, to=None):
+    """Send a list of WhatsApp messages in sequence.
+    Returns True if all messages sent successfully."""
+    import time as _time
+    success = True
+    for i, msg in enumerate(messages):
+        result = send_whatsapp(msg, to=to)
+        if not result:
+            success = False
+        # Brief pause between messages to maintain ordering
+        if i < len(messages) - 1:
+            _time.sleep(1)
+    return success
+
+
 # ─── State tracking ───
 
 class BotState:
@@ -158,84 +175,101 @@ def run_reindex(db_path):
 
 # ─── Message formatting ───
 
-# Twilio WhatsApp sandbox limit; production is higher but we stay safe
+# Twilio WhatsApp sandbox limit
 WHATSAPP_CHAR_LIMIT = 1500  # leave 100 chars headroom for encoding
 
 
+def _split_messages(header, job_entries, footer=''):
+    """Split job entries across multiple messages, each under the char limit.
+
+    Returns a list of message strings. The header is on the first message,
+    the footer on the last.
+    """
+    messages = []
+    current_lines = []
+    # Reserve space for header on first message, footer on last
+    current_len = len(header)
+
+    for entry in job_entries:
+        # Would adding this entry exceed the limit?
+        # Account for footer on every message in case it's the last
+        if current_len + len(entry) + len(footer) > WHATSAPP_CHAR_LIMIT and current_lines:
+            # Flush current message
+            prefix = header if not messages else ''
+            messages.append(prefix + ''.join(current_lines))
+            current_lines = []
+            current_len = 0
+
+        current_lines.append(entry)
+        current_len += len(entry)
+
+    # Flush remaining
+    if current_lines or not messages:
+        prefix = header if not messages else ''
+        messages.append(prefix + ''.join(current_lines) + footer)
+    elif messages:
+        # Append footer to last message
+        messages[-1] += footer
+
+    # Add part numbering if multiple messages
+    if len(messages) > 1:
+        for i in range(len(messages)):
+            messages[i] = f"[{i+1}/{len(messages)}]\n" + messages[i]
+
+    return messages
+
+
+def _format_job_entry(i, job):
+    """Format a single job entry with title, employer, salary, and URL."""
+    title = job.title[:60] + '…' if len(job.title) > 60 else job.title
+    employer = job.employer[:40] + '…' if len(job.employer) > 40 else job.employer
+    salary_part = f" | {job.salary}" if job.salary else ""
+
+    entry = f"{i}. *{title}*\n   {employer}{salary_part}\n"
+    if job.url:
+        entry += f"   {job.url}\n"
+    entry += "\n"
+    return entry
+
+
 def format_morning_digest(new_jobs, total_in_db):
-    """Format the 9am morning digest message, respecting WhatsApp char limit."""
+    """Format the 9am morning digest. Returns list of message strings."""
     now = datetime.now()
     date_str = now.strftime('%A %d %B %Y')
 
     if not new_jobs:
-        return (
+        return [(
             f"🏥 *NHS Job Search — Morning Update*\n"
             f"📅 {date_str}\n\n"
             f"No new roles matching your search since yesterday.\n\n"
             f"📊 {total_in_db} jobs in your index."
-        )
+        )]
 
     header = (
         f"🏥 *NHS Job Search — Morning Update*\n"
         f"📅 {date_str}\n\n"
-        f"✨ *{len(new_jobs)} new role{'s' if len(new_jobs) != 1 else ''}* since yesterday:\n\n"
+        f"✨ *{len(new_jobs)} new role{'s' if len(new_jobs) != 1 else ''}* "
+        f"since yesterday:\n\n"
     )
 
     footer = f"\n📊 {total_in_db} total jobs in your index."
 
-    # Build job list, stopping before we exceed the limit
-    job_lines = []
-    shown = 0
-    for i, job in enumerate(new_jobs, 1):
-        title = job.title[:60] + '…' if len(job.title) > 60 else job.title
-        employer = job.employer[:40] + '…' if len(job.employer) > 40 else job.employer
-        salary_part = f" | {job.salary}" if job.salary else ""
-
-        entry = f"{i}. *{title}*\n   {employer}{salary_part}\n"
-
-        # Check if adding this entry would bust the limit
-        overflow = f"… +{len(new_jobs) - shown} more\n"
-        projected = len(header) + len(''.join(job_lines)) + len(entry) + len(overflow) + len(footer)
-
-        if projected > WHATSAPP_CHAR_LIMIT and shown > 0:
-            job_lines.append(f"… +{len(new_jobs) - shown} more\n")
-            break
-
-        job_lines.append(entry)
-        shown += 1
-
-    return header + ''.join(job_lines) + footer
+    entries = [_format_job_entry(i, job) for i, job in enumerate(new_jobs, 1)]
+    return _split_messages(header, entries, footer)
 
 
-def format_afternoon_alert(new_jobs):
-    """Format the mid-day alert, respecting WhatsApp char limit."""
+def format_interval_alert(new_jobs):
+    """Format an interval alert (only sent if new jobs exist).
+    Returns list of message strings."""
     header = (
         f"🔔 *New roles just posted*\n"
         f"📅 {datetime.now().strftime('%H:%M %d %b')}\n\n"
         f"{len(new_jobs)} new role{'s' if len(new_jobs) != 1 else ''} "
-        f"since this morning:\n\n"
+        f"since last check:\n\n"
     )
 
-    job_lines = []
-    shown = 0
-    for i, job in enumerate(new_jobs, 1):
-        title = job.title[:60] + '…' if len(job.title) > 60 else job.title
-        employer = job.employer[:40] + '…' if len(job.employer) > 40 else job.employer
-        salary_part = f" | {job.salary}" if job.salary else ""
-
-        entry = f"{i}. *{title}*\n   {employer}{salary_part}\n"
-
-        overflow = f"… +{len(new_jobs) - shown} more\n"
-        projected = len(header) + len(''.join(job_lines)) + len(entry) + len(overflow)
-
-        if projected > WHATSAPP_CHAR_LIMIT and shown > 0:
-            job_lines.append(f"… +{len(new_jobs) - shown} more\n")
-            break
-
-        job_lines.append(entry)
-        shown += 1
-
-    return header + ''.join(job_lines)
+    entries = [_format_job_entry(i, job) for i, job in enumerate(new_jobs, 1)]
+    return _split_messages(header, entries)
 
 
 # ─── Scheduler actions ───
@@ -245,24 +279,22 @@ def action_reindex(db_path, bot_state):
     logger.info("Starting scheduled reindex...")
     new_jobs, total = run_reindex(db_path)
     bot_state.set('last_reindex', datetime.now().isoformat())
+    bot_state.set('last_reindex_new_count', len(new_jobs))
     logger.info(f"Reindex complete: {len(new_jobs)} new, {total} total.")
     return new_jobs
 
 
 def action_morning_notify(db_path, bot_state):
-    """9am morning digest — always sends, even if no new jobs."""
+    """Morning digest — always sends, even if no new jobs."""
     logger.info("Preparing morning digest...")
 
-    # Get all jobs currently in DB
     all_jobs = database.get_all_jobs(db_path)
     total_count = len(all_jobs)
 
-    # Find jobs that are new since last morning notify
-    last_morning = bot_state.get('last_morning_notify')
+    # Find jobs new since last morning notify
     morning_urls = set(bot_state.get('morning_job_urls', []))
 
     if morning_urls:
-        # New = jobs whose URLs weren't in the DB at last morning notify
         current_urls = {j.url for j in all_jobs}
         new_urls = current_urls - morning_urls
         new_jobs = [j for j in all_jobs if j.url in new_urls]
@@ -270,48 +302,50 @@ def action_morning_notify(db_path, bot_state):
         # First run — treat recent jobs (last 24h) as "new"
         new_jobs = _jobs_posted_since(all_jobs, hours=24)
 
-    # Send the digest
-    msg = format_morning_digest(new_jobs, total_count)
-    result = send_whatsapp(msg)
+    messages = format_morning_digest(new_jobs, total_count)
+    success = send_whatsapp_multi(messages)
 
-    if result:
-        # Record what we've notified about
+    if success:
         bot_state.set('last_morning_notify', datetime.now().isoformat())
         bot_state.set('morning_job_urls', [j.url for j in all_jobs])
-        logger.info(f"Morning digest sent: {len(new_jobs)} new jobs.")
+        # Reset baseline for interval checks
+        bot_state.set('last_notify_urls', [j.url for j in all_jobs])
+        logger.info(f"Morning digest sent: {len(new_jobs)} new jobs, "
+                     f"{len(messages)} message(s).")
     else:
         logger.error("Failed to send morning digest.")
 
 
-def action_afternoon_notify(db_path, bot_state):
-    """Afternoon alert — only sends if there are new jobs since morning."""
-    logger.info("Checking for afternoon alert...")
+def action_interval_notify(db_path, bot_state):
+    """Interval alert — only sends if there are new jobs since last notify."""
+    logger.info("Checking for interval alert...")
 
     all_jobs = database.get_all_jobs(db_path)
-    morning_urls = set(bot_state.get('morning_job_urls', []))
+    baseline_urls = set(bot_state.get('last_notify_urls', []))
 
-    if not morning_urls:
-        logger.info("No morning baseline — skipping afternoon alert.")
+    if not baseline_urls:
+        logger.info("No baseline — skipping interval alert.")
         return
 
     current_urls = {j.url for j in all_jobs}
-    new_urls = current_urls - morning_urls
+    new_urls = current_urls - baseline_urls
     new_jobs = [j for j in all_jobs if j.url in new_urls]
 
     if not new_jobs:
-        logger.info("No new jobs since morning — skipping afternoon alert.")
+        logger.info("No new jobs since last notify — skipping interval alert.")
         return
 
-    msg = format_afternoon_alert(new_jobs)
-    result = send_whatsapp(msg)
+    messages = format_interval_alert(new_jobs)
+    success = send_whatsapp_multi(messages)
 
-    if result:
-        bot_state.set('last_afternoon_notify', datetime.now().isoformat())
-        # Update baseline so next afternoon doesn't re-notify
-        bot_state.set('morning_job_urls', [j.url for j in all_jobs])
-        logger.info(f"Afternoon alert sent: {len(new_jobs)} new jobs.")
+    if success:
+        bot_state.set('last_interval_notify', datetime.now().isoformat())
+        # Update baseline so next interval doesn't re-notify
+        bot_state.set('last_notify_urls', [j.url for j in all_jobs])
+        logger.info(f"Interval alert sent: {len(new_jobs)} new jobs, "
+                     f"{len(messages)} message(s).")
     else:
-        logger.error("Failed to send afternoon alert.")
+        logger.error("Failed to send interval alert.")
 
 
 def _jobs_posted_since(jobs, hours=24):
@@ -344,16 +378,39 @@ def _jobs_posted_since(jobs, hours=24):
 
 # ─── Main scheduler loop ───
 
+def _reindex_and_maybe_notify(db_path, bot_state, is_morning=False):
+    """Combined action: reindex then decide whether to notify.
+
+    - Morning slot: always sends digest (even if 0 new jobs).
+    - Other slots: only sends if reindex found new jobs.
+    """
+    action_reindex(db_path, bot_state)
+
+    if is_morning:
+        action_morning_notify(db_path, bot_state)
+    else:
+        action_interval_notify(db_path, bot_state)
+
+
 def run_bot(config_path=None):
-    """Main entry point for the WhatsApp notification bot."""
+    """Main entry point for the WhatsApp notification bot.
+
+    Schedule:
+        Every interval_hours (default 6h), reindex all sources.
+        The first run of the day (morning_time) always sends a digest.
+        Subsequent interval runs only notify if new jobs were found.
+
+    Config [WHATSAPP]:
+        interval_hours            = 6
+        morning_time              = 08:00
+        notify_delay_minutes      = 5   (delay between reindex and notify)
+    """
     import schedule
 
-    # Init config
     if config_path is None:
         config_path = "~/.config/nhs-job-search/config.ini"
     config.init_config(config_path)
 
-    # Ensure WHATSAPP section exists with defaults
     _ensure_whatsapp_config()
 
     wa_cfg = config.CONFIG['WHATSAPP']
@@ -361,7 +418,6 @@ def run_bot(config_path=None):
         print("WhatsApp bot is disabled. Set enabled = true in [WHATSAPP] config.")
         return
 
-    # Setup logging
     _setup_logging()
 
     db_path = config.db_path()
@@ -372,37 +428,50 @@ def run_bot(config_path=None):
     logger.info(f"  DB: {db_path}")
     logger.info(f"  To: {wa_cfg.get('notify_to', '(not set)')}")
 
-    # Parse schedule times
-    reindex_times = [t.strip() for t in wa_cfg.get('reindex_times', '08:00, 16:00').split(',')]
-    morning_notify = wa_cfg.get('notify_morning', '09:00')
-    afternoon_delay = int(wa_cfg.get('notify_afternoon_delay_minutes', '5'))
+    # Parse schedule config
+    interval_hours = int(wa_cfg.get('interval_hours', '6'))
+    morning_time = wa_cfg.get('morning_time', '08:00')
+    notify_delay = int(wa_cfg.get('notify_delay_minutes', '5'))
 
-    # Schedule reindexes
-    for reindex_time in reindex_times:
-        schedule.every().day.at(reindex_time).do(
+    # Build the schedule slots: morning + every N hours from morning
+    # e.g. morning=08:00, interval=6 → 08:00, 14:00, 20:00, 02:00
+    try:
+        mh, mm = morning_time.split(':')
+        morning_hour, morning_min = int(mh), int(mm)
+    except ValueError:
+        morning_hour, morning_min = 8, 0
+
+    slots = []
+    for i in range(24 // interval_hours):
+        slot_hour = (morning_hour + i * interval_hours) % 24
+        slot_time = f"{slot_hour:02d}:{morning_min:02d}"
+        is_morning = (i == 0)
+        slots.append((slot_time, is_morning))
+
+    # Schedule reindex at each slot, with notify after a delay
+    for slot_time, is_morning in slots:
+        # Schedule reindex
+        schedule.every().day.at(slot_time).do(
             action_reindex, db_path=db_path, bot_state=bot_state)
-        logger.info(f"  Reindex scheduled at {reindex_time}")
 
-    # Schedule morning digest
-    schedule.every().day.at(morning_notify).do(
-        action_morning_notify, db_path=db_path, bot_state=bot_state)
-    logger.info(f"  Morning digest at {morning_notify}")
-
-    # Schedule afternoon alerts (after each non-morning reindex)
-    for reindex_time in reindex_times:
-        # Parse the reindex time and add delay
+        # Schedule notify after delay
         try:
-            h, m = reindex_time.split(':')
-            afternoon_time = datetime(2000, 1, 1, int(h), int(m)) + timedelta(minutes=afternoon_delay)
-            alert_time = afternoon_time.strftime('%H:%M')
-
-            # Only schedule afternoon alerts for reindexes after morning notify
-            if reindex_time > morning_notify:
-                schedule.every().day.at(alert_time).do(
-                    action_afternoon_notify, db_path=db_path, bot_state=bot_state)
-                logger.info(f"  Afternoon alert at {alert_time}")
+            notify_dt = datetime(2000, 1, 1, *map(int, slot_time.split(':'))) + \
+                        timedelta(minutes=notify_delay)
+            notify_time = notify_dt.strftime('%H:%M')
         except ValueError:
-            logger.warning(f"  Invalid reindex time: {reindex_time}")
+            notify_time = slot_time
+
+        if is_morning:
+            schedule.every().day.at(notify_time).do(
+                action_morning_notify, db_path=db_path, bot_state=bot_state)
+            logger.info(f"  Slot {slot_time}: reindex → "
+                        f"{notify_time}: morning digest (always)")
+        else:
+            schedule.every().day.at(notify_time).do(
+                action_interval_notify, db_path=db_path, bot_state=bot_state)
+            logger.info(f"  Slot {slot_time}: reindex → "
+                        f"{notify_time}: interval alert (if new jobs)")
 
     # If no index exists, do initial reindex
     if not os.path.exists(db_path):
@@ -410,16 +479,19 @@ def run_bot(config_path=None):
         action_reindex(db_path, bot_state)
 
     # Run the scheduler loop
+    slot_summary = ', '.join(t for t, _ in slots)
     logger.info("Bot running. Press Ctrl+C to stop.")
-    print(f"WhatsApp bot running. Notifications → {wa_cfg.get('notify_to', '(not set)')}")
-    print(f"  Reindex: {', '.join(reindex_times)}")
-    print(f"  Morning digest: {morning_notify}")
+    print(f"WhatsApp bot running. Notifications → "
+          f"{wa_cfg.get('notify_to', '(not set)')}")
+    print(f"  Schedule: every {interval_hours}h at {slot_summary}")
+    print(f"  Morning digest (always): {morning_time}")
+    print(f"  Notify delay: {notify_delay} min after reindex")
     print(f"  Press Ctrl+C to stop.\n")
 
     try:
         while True:
             schedule.run_pending()
-            time.sleep(30)  # Check every 30 seconds
+            time.sleep(30)
     except KeyboardInterrupt:
         logger.info("Bot stopped by user.")
         print("\nBot stopped.")
@@ -482,9 +554,9 @@ def _ensure_whatsapp_config():
         'twilio_auth_token': '',
         'twilio_from': 'whatsapp:+14155238886',
         'notify_to': '',
-        'reindex_times': '08:00, 16:00',
-        'notify_morning': '09:00',
-        'notify_afternoon_delay_minutes': '5',
+        'interval_hours': '6',
+        'morning_time': '08:00',
+        'notify_delay_minutes': '5',
         'enabled': 'false',
     }
     for key, value in defaults.items():
