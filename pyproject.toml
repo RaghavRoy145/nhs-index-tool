@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "nhsjobsearch"
+version = "0.1.0"
+description = "NHS & DWP Job Search Indexing Tool"
+requires-python = ">=3.9"
+dependencies = [
+    "requests",
+    "beautifulsoup4",
+    "rapidfuzz",
+    "lxml",
+]
+
+[project.scripts]
+nhsjobsearch = "nhsjobsearch.main:run_tool"
