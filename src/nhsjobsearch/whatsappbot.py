@@ -156,8 +156,12 @@ def run_reindex(db_path):
 
 # ─── Message formatting ───
 
+# Twilio WhatsApp sandbox limit; production is higher but we stay safe
+WHATSAPP_CHAR_LIMIT = 1500  # leave 100 chars headroom for encoding
+
+
 def format_morning_digest(new_jobs, total_in_db):
-    """Format the 9am morning digest message."""
+    """Format the 9am morning digest message, respecting WhatsApp char limit."""
     now = datetime.now()
     date_str = now.strftime('%A %d %B %Y')
 
@@ -166,56 +170,70 @@ def format_morning_digest(new_jobs, total_in_db):
             f"🏥 *NHS Job Search — Morning Update*\n"
             f"📅 {date_str}\n\n"
             f"No new roles matching your search since yesterday.\n\n"
-            f"📊 {total_in_db} jobs in your index.\n"
-            f"Your search terms and settings are unchanged."
+            f"📊 {total_in_db} jobs in your index."
         )
 
-    # Group by source
-    nhs_jobs = [j for j in new_jobs if j.source == 'nhs']
-    dwp_jobs = [j for j in new_jobs if j.source == 'dwp']
-
-    msg = (
+    header = (
         f"🏥 *NHS Job Search — Morning Update*\n"
         f"📅 {date_str}\n\n"
         f"✨ *{len(new_jobs)} new role{'s' if len(new_jobs) != 1 else ''}* since yesterday:\n\n"
     )
 
-    for i, job in enumerate(new_jobs[:15], 1):
+    footer = f"\n📊 {total_in_db} total jobs in your index."
+
+    # Build job list, stopping before we exceed the limit
+    job_lines = []
+    shown = 0
+    for i, job in enumerate(new_jobs, 1):
+        title = job.title[:60] + '…' if len(job.title) > 60 else job.title
+        employer = job.employer[:40] + '…' if len(job.employer) > 40 else job.employer
         salary_part = f" | {job.salary}" if job.salary else ""
-        msg += f"{i}. *{job.title}*\n"
-        msg += f"   {job.employer}{salary_part}\n"
-        if job.url:
-            msg += f"   {job.url}\n"
-        msg += "\n"
 
-    if len(new_jobs) > 15:
-        msg += f"... and {len(new_jobs) - 15} more.\n\n"
+        entry = f"{i}. *{title}*\n   {employer}{salary_part}\n"
 
-    msg += f"📊 {total_in_db} total jobs in your index."
-    return msg
+        # Check if adding this entry would bust the limit
+        overflow = f"… +{len(new_jobs) - shown} more\n"
+        projected = len(header) + len(''.join(job_lines)) + len(entry) + len(overflow) + len(footer)
+
+        if projected > WHATSAPP_CHAR_LIMIT and shown > 0:
+            job_lines.append(f"… +{len(new_jobs) - shown} more\n")
+            break
+
+        job_lines.append(entry)
+        shown += 1
+
+    return header + ''.join(job_lines) + footer
 
 
 def format_afternoon_alert(new_jobs):
-    """Format the mid-day alert (only sent if there are new jobs)."""
-    msg = (
+    """Format the mid-day alert, respecting WhatsApp char limit."""
+    header = (
         f"🔔 *New roles just posted*\n"
         f"📅 {datetime.now().strftime('%H:%M %d %b')}\n\n"
         f"{len(new_jobs)} new role{'s' if len(new_jobs) != 1 else ''} "
         f"since this morning:\n\n"
     )
 
-    for i, job in enumerate(new_jobs[:10], 1):
+    job_lines = []
+    shown = 0
+    for i, job in enumerate(new_jobs, 1):
+        title = job.title[:60] + '…' if len(job.title) > 60 else job.title
+        employer = job.employer[:40] + '…' if len(job.employer) > 40 else job.employer
         salary_part = f" | {job.salary}" if job.salary else ""
-        msg += f"{i}. *{job.title}*\n"
-        msg += f"   {job.employer}{salary_part}\n"
-        if job.url:
-            msg += f"   {job.url}\n"
-        msg += "\n"
 
-    if len(new_jobs) > 10:
-        msg += f"... and {len(new_jobs) - 10} more.\n"
+        entry = f"{i}. *{title}*\n   {employer}{salary_part}\n"
 
-    return msg
+        overflow = f"… +{len(new_jobs) - shown} more\n"
+        projected = len(header) + len(''.join(job_lines)) + len(entry) + len(overflow)
+
+        if projected > WHATSAPP_CHAR_LIMIT and shown > 0:
+            job_lines.append(f"… +{len(new_jobs) - shown} more\n")
+            break
+
+        job_lines.append(entry)
+        shown += 1
+
+    return header + ''.join(job_lines)
 
 
 # ─── Scheduler actions ───

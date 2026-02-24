@@ -1,4 +1,6 @@
 import curses
+import os
+import subprocess
 import webbrowser
 from . import database
 from .jobitem import JobItem
@@ -14,11 +16,50 @@ except ImportError:
     HAS_RAPIDFUZZ = False
 
 
-def _sanitise_display(text):
-    """Strip control characters that break curses rendering."""
+def _is_wsl():
+    """Detect if running inside Windows Subsystem for Linux."""
+    try:
+        with open('/proc/version', 'r') as f:
+            return 'microsoft' in f.read().lower()
+    except (IOError, OSError):
+        return False
+
+
+def _open_url(url):
+    """Open a URL in the default browser, with WSL fallback."""
+    if _is_wsl():
+        # WSL: use Windows-side browser via cmd.exe or wslview
+        try:
+            subprocess.Popen(
+                ['wslview', url],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return
+        except FileNotFoundError:
+            pass
+        try:
+            subprocess.Popen(
+                ['cmd.exe', '/c', 'start', '', url.replace('&', '^&')],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return
+        except FileNotFoundError:
+            pass
+    # Standard path — works on macOS, native Linux, etc.
+    webbrowser.open(url)
+
+
+def _sanitise_row(text):
+    """Strip ALL control characters (including newlines) for single-line row rendering."""
     if not text:
         return ''
     return re.sub(r'[\x00-\x1f\x7f-\x9f]', ' ', text).strip()
+
+
+def _sanitise_popup(text):
+    """Strip control characters but preserve newlines and tabs for multi-line popups."""
+    if not text:
+        return ''
+    # Keep \n (\x0a) and \t (\x09), strip everything else
+    return re.sub(r'[\x00-\x08\x0b-\x0c\x0e-\x1f\x7f-\x9f]', ' ', text)
 
 
 class DisplayView(object):
@@ -179,7 +220,7 @@ ACTIONS:
         if not text:
             return ''
         # Sanitise control characters before truncation
-        text = _sanitise_display(text)
+        text = _sanitise_row(text)
         if len(text) <= width:
             return text
         return text[:width - 1] + '…'
@@ -222,8 +263,8 @@ ACTIONS:
 
     def popup(self, text):
         max_h, max_w = self.screen.getmaxyx()
-        # Sanitise text for popup display
-        text = _sanitise_display(text)
+        # Sanitise text for popup display (preserve newlines for splitlines)
+        text = _sanitise_popup(text)
         lines = sum((textwrap.wrap(line, width=max_w - 16, max_lines=int(max_h / 3),
                                    subsequent_indent="  ")
                      for line in text.splitlines()), [])
@@ -411,7 +452,7 @@ ACTIONS:
 
                 if key in (10, curses.KEY_ENTER, ord('w')):
                     if self.active_item and self.active_item.url:
-                        webbrowser.open(self.active_item.url)
+                        _open_url(self.active_item.url)
 
                 if key == ord('p'):
                     job = self.active_item

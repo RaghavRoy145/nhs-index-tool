@@ -78,7 +78,7 @@ def test_afternoon_alert():
 
 
 def test_morning_digest_many_jobs():
-    print("=== Testing Morning Digest (>15 jobs, truncated) ===")
+    print("=== Testing Morning Digest (many jobs) ===")
 
     jobs = [
         JobItem(url=f"https://example.com/{i}", title=f"Job {i}",
@@ -89,12 +89,47 @@ def test_morning_digest_many_jobs():
     msg = format_morning_digest(jobs, total_in_db=500)
 
     assert '20 new roles' in msg
-    assert 'Job 0' in msg    # First job shown
-    assert 'Job 14' in msg   # 15th job shown
-    assert '... and 5 more' in msg  # Truncation notice
-    print(f"  Truncation notice present: ✓")
+    assert 'Job 1' in msg    # First job shown (1-indexed)
+    assert len(msg) <= 1600   # Must respect limit
+    print(f"  Message: {len(msg)} chars, 20 jobs fit ✓")
 
-    print("  ✓ Truncated digest OK\n")
+    print("  ✓ Many jobs digest OK\n")
+
+
+def test_char_limit():
+    print("=== Testing WhatsApp 1600 Char Limit ===")
+
+    from nhsjobsearch.whatsappbot import WHATSAPP_CHAR_LIMIT
+
+    # Create lots of jobs with long titles and employers
+    jobs = [
+        JobItem(
+            url=f"https://www.jobs.nhs.uk/candidate/jobadvert/LONG-{i:04d}",
+            title=f"Senior Advanced Clinical Specialist Practitioner Band 7 - Department {i}",
+            employer=f"University Hospitals of North Midlands NHS Foundation Trust",
+            salary=f"£43,742 to £50,056 a year",
+            source="nhs")
+        for i in range(50)
+    ]
+
+    msg = format_morning_digest(jobs, total_in_db=800)
+    assert len(msg) <= 1600, f"Morning digest too long: {len(msg)} chars"
+    assert '50 new roles' in msg
+    assert 'more' in msg  # Must have truncated
+    print(f"  Morning digest: {len(msg)} chars (limit 1600) ✓")
+
+    msg2 = format_afternoon_alert(jobs)
+    assert len(msg2) <= 1600, f"Afternoon alert too long: {len(msg2)} chars"
+    print(f"  Afternoon alert: {len(msg2)} chars (limit 1600) ✓")
+
+    # Small message should still be under limit
+    small_jobs = jobs[:2]
+    msg3 = format_morning_digest(small_jobs, total_in_db=800)
+    assert len(msg3) <= 1600
+    assert '2 new roles' in msg3
+    print(f"  Small digest: {len(msg3)} chars ✓")
+
+    print("  ✓ Char limit OK\n")
 
 
 def test_bot_state():
@@ -158,6 +193,7 @@ if __name__ == '__main__':
     test_morning_digest_no_jobs()
     test_afternoon_alert()
     test_morning_digest_many_jobs()
+    test_char_limit()
     test_bot_state()
     test_config_defaults()
     print("All WhatsApp bot tests passed! ✓")
