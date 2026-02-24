@@ -12,6 +12,7 @@ dependencies = [
     "beautifulsoup4",
     "rapidfuzz",
     "lxml",
+    "schedule"
 ]
 
 [project.scripts]
