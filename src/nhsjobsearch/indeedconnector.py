@@ -34,17 +34,123 @@ class IndeedConnector:
     RESULTS_PER_PAGE = 15
     VIEW_URL = 'https://uk.indeed.com/viewjob'
 
+    # Mobile endpoint is less aggressive with bot detection
+    MOBILE_SEARCH_URL = 'https://uk.indeed.com/m/jobs'
+
     def __init__(self, name="Indeed UK"):
         self.name = name
         self.session = requests.Session()
+        self._setup_session()
+        self._cookies_primed = False
+
+    def _setup_session(self):
+        """Configure session with realistic browser headers."""
         self.session.headers.update({
             'User-Agent': (
-                'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 '
-                '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                'AppleWebKit/537.36 (KHTML, like Gecko) '
+                'Chrome/131.0.0.0 Safari/537.36'
             ),
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9',
-            'Accept-Language': 'en-GB,en;q=0.9',
+            'Accept': (
+                'text/html,application/xhtml+xml,application/xml;'
+                'q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8'
+            ),
+            'Accept-Language': 'en-GB,en-US;q=0.9,en;q=0.8',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Cache-Control': 'max-age=0',
+            'Connection': 'keep-alive',
+            'DNT': '1',
+            'Sec-CH-UA': '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+            'Sec-CH-UA-Mobile': '?0',
+            'Sec-CH-UA-Platform': '"Windows"',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Sec-Fetch-User': '?1',
+            'Upgrade-Insecure-Requests': '1',
         })
+
+    def _prime_cookies(self):
+        """Hit the homepage to pick up session cookies before searching.
+        Indeed uses cookies for bot detection; without them requests get 403."""
+        if self._cookies_primed:
+            return
+        try:
+            resp = self.session.get(self.BASE_URL, timeout=15)
+            logger.debug(f"Cookie prime: {resp.status_code}, "
+                         f"cookies: {len(self.session.cookies)}")
+            self._cookies_primed = True
+            time.sleep(0.5)
+        except requests.RequestException as e:
+            logger.debug(f"Cookie prime failed: {e}")
+
+    def _fetch_search_page(self, params):
+        """Fetch a search page with fallback to mobile endpoint.
+
+        Tries the desktop endpoint first. On 403, retries once via the
+        mobile endpoint which tends to have lighter bot detection.
+        """
+        self._prime_cookies()
+
+        # Update referer for subsequent searches
+        self.session.headers['Referer'] = self.BASE_URL + '/'
+        self.session.headers['Sec-Fetch-Site'] = 'same-origin'
+
+        # Attempt 1: desktop
+        try:
+            response = self.session.get(
+                self.SEARCH_URL, params=params, timeout=30)
+            if response.status_code == 200:
+                return response
+            logger.debug(f"Desktop search returned {response.status_code}")
+        except requests.RequestException as e:
+            logger.debug(f"Desktop search failed: {e}")
+
+        # Attempt 2: mobile endpoint (lighter bot detection)
+        time.sleep(1)
+        try:
+            mobile_params = dict(params)
+            response = self.session.get(
+                self.MOBILE_SEARCH_URL, params=mobile_params, timeout=30)
+            if response.status_code == 200:
+                logger.info("Fell back to mobile endpoint successfully.")
+                return response
+            logger.debug(f"Mobile search returned {response.status_code}")
+        except requests.RequestException as e:
+            logger.debug(f"Mobile search failed: {e}")
+
+        # Attempt 3: fresh session with mobile UA
+        time.sleep(1)
+        try:
+            mobile_session = requests.Session()
+            mobile_session.headers.update({
+                'User-Agent': (
+                    'Mozilla/5.0 (Linux; Android 14; Pixel 8) '
+                    'AppleWebKit/537.36 (KHTML, like Gecko) '
+                    'Chrome/131.0.0.0 Mobile Safari/537.36'
+                ),
+                'Accept': 'text/html,application/xhtml+xml',
+                'Accept-Language': 'en-GB,en;q=0.9',
+                'Accept-Encoding': 'gzip, deflate, br',
+            })
+            # Prime mobile session
+            mobile_session.get(self.BASE_URL, timeout=15)
+            time.sleep(0.5)
+
+            response = mobile_session.get(
+                self.MOBILE_SEARCH_URL, params=params, timeout=30)
+            if response.status_code == 200:
+                logger.info("Fell back to fresh mobile session successfully.")
+                return response
+
+            # If all attempts fail, raise with the last status
+            response.raise_for_status()
+        except requests.RequestException as e:
+            raise requests.RequestException(
+                f"All Indeed endpoints returned errors. "
+                f"Last: {e}") from e
+
+        return None
 
     def __str__(self):
         return self.name
@@ -357,9 +463,10 @@ class IndeedConnector:
                 start=start_offset, keyword_override=keyword_override)
 
             try:
-                response = self.session.get(
-                    self.SEARCH_URL, params=params, timeout=30)
-                response.raise_for_status()
+                response = self._fetch_search_page(params)
+                if response is None:
+                    print(f"  No response for page {page_num + 1}.")
+                    break
             except requests.RequestException as e:
                 logger.warning(f"Failed to fetch page {page_num + 1}: {e}")
                 print(f"  Failed page {page_num + 1}: {e}")
