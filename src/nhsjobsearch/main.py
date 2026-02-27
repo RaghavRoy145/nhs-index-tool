@@ -54,11 +54,17 @@ def get_opts():
                      action="store_true", default=False)
 
     # WhatsApp bot
-    parse.add_option("--bot", help="Start WhatsApp notification bot",
+    parse.add_option("--bot", help="Start WhatsApp notification bot (long-running daemon)",
+                     action="store_true", default=False)
+    parse.add_option("--bot-once", help="Reindex + notify once (for systemd/cron)",
                      action="store_true", default=False)
     parse.add_option("--bot-test", help="Send a test WhatsApp message",
                      action="store_true", default=False)
     parse.add_option("--bot-digest", help="Force send morning digest now",
+                     action="store_true", default=False)
+    parse.add_option("--bot-install", help="Install systemd timer (Persistent=true, survives sleep)",
+                     action="store_true", default=False)
+    parse.add_option("--bot-uninstall", help="Remove systemd timer",
                      action="store_true", default=False)
 
     # Subscriptions
@@ -229,25 +235,30 @@ def run_tool():
         return
 
     # Subscription management
-    # if opts.subscribe:
-    #     from .subscriptions import cli_subscribe
-    #     cli_subscribe(opts.subscribe, opts.source_filter)
-    #     return
+    if opts.subscribe:
+        from .subscriptions import cli_subscribe
+        cli_subscribe(opts.subscribe, opts.source_filter)
+        return
 
-    # if opts.unsubscribe:
-    #     from .subscriptions import cli_unsubscribe
-    #     cli_unsubscribe(opts.unsubscribe)
-    #     return
+    if opts.unsubscribe:
+        from .subscriptions import cli_unsubscribe
+        cli_unsubscribe(opts.unsubscribe)
+        return
 
-    # if opts.subscriptions:
-    #     from .subscriptions import show_subscriptions
-    #     show_subscriptions()
-    #     return
+    if opts.subscriptions:
+        from .subscriptions import show_subscriptions
+        show_subscriptions()
+        return
 
     # WhatsApp bot commands
     if opts.bot:
         from .whatsappbot import run_bot
         run_bot(config_path)
+        return
+
+    if opts.bot_once:
+        from .whatsappbot import run_once
+        run_once(config_path)
         return
 
     if opts.bot_test:
@@ -258,6 +269,16 @@ def run_tool():
     if opts.bot_digest:
         from .whatsappbot import send_digest_now
         send_digest_now(config_path)
+        return
+
+    if opts.bot_install:
+        from .whatsappbot import install_systemd_service
+        install_systemd_service(config_path)
+        return
+
+    if opts.bot_uninstall:
+        from .whatsappbot import uninstall_systemd_service
+        uninstall_systemd_service()
         return
 
     # Standalone prompt generator (no job pre-selected)

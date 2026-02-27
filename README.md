@@ -121,10 +121,48 @@ enabled            = true
 ### Running
 
 ```bash
-nhsjobsearch --bot               # Start the notification daemon
+nhsjobsearch --bot               # Start the notification daemon (long-running, needs tmux)
+nhsjobsearch --bot-once          # Single-shot: reindex + notify (for systemd/cron)
 nhsjobsearch --bot-test          # Send a test message
 nhsjobsearch --bot-digest        # Force-send a morning digest now
+nhsjobsearch --bot-install       # Install systemd timer (recommended on Linux)
+nhsjobsearch --bot-uninstall     # Remove systemd timer
 ```
+
+### Systemd Timer (Recommended on Linux)
+
+The `--bot` daemon runs a `schedule` loop inside tmux or similar. The problem is that when a laptop sleeps, the entire OS suspends — tmux keeps the session alive but the process doesn't actually run. Missed scheduled slots fire all at once on wake, which isn't ideal.
+
+The better approach is a **systemd timer with `Persistent=true`**:
+
+```bash
+nhsjobsearch --bot-install
+```
+
+This creates two user-level systemd units:
+
+- `nhsjobsearch-bot.service` — a oneshot that runs `nhsjobsearch --bot-once` (reindex + smart notify)
+- `nhsjobsearch-bot.timer` — fires every `interval_hours` with `Persistent=true`
+
+**How `Persistent=true` works:** systemd records the last time the timer fired. When your laptop wakes from sleep (or boots after being off), systemd sees the missed timer and fires the service immediately. You get your notification within seconds of opening the lid.
+
+**What `--bot-once` decides:** It checks whether a morning digest has already been sent today. If not (e.g. you slept through the morning slot), it sends a full morning digest. Otherwise, it sends an interval alert (only if new jobs were found).
+
+```bash
+# Check timer status
+systemctl --user status nhsjobsearch-bot.timer
+
+# Check last run
+systemctl --user status nhsjobsearch-bot.service
+
+# Follow logs
+journalctl --user -u nhsjobsearch-bot -f
+
+# Remove
+nhsjobsearch --bot-uninstall
+```
+
+**Note:** `--bot-install` also enables "lingering" (`loginctl enable-linger`) so that your user timers keep running even when you're not logged into a graphical session. This may require sudo on some systems.
 
 ### Schedule
 

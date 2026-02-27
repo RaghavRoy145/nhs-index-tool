@@ -545,7 +545,202 @@ def send_digest_now(config_path=None):
     action_morning_notify(db_path, bot_state)
 
 
-# ─── Config helpers ───
+# ─── Single-shot mode (for systemd / cron) ───
+
+def run_once(config_path=None):
+    """Reindex all sources, then send the appropriate notification.
+
+    Designed to be called by a systemd timer or cron. Decides whether
+    to send a morning digest (always) or an interval alert (only if
+    new jobs) based on the current time and the morning_time config.
+    """
+    if config_path is None:
+        config_path = "~/.config/nhs-job-search/config.ini"
+    config.init_config(config_path)
+    _ensure_whatsapp_config()
+
+    wa_cfg = config.CONFIG['WHATSAPP']
+    if not wa_cfg.getboolean('enabled', fallback=False):
+        print("WhatsApp bot is disabled. Set enabled = true in [WHATSAPP] config.")
+        return
+
+    _setup_logging()
+
+    db_path = config.db_path()
+    cache_dir = os.path.expanduser(config.CONFIG['CACHE']['path'])
+    bot_state = BotState(os.path.join(cache_dir, 'whatsapp_state.json'))
+
+    # Reindex
+    action_reindex(db_path, bot_state)
+
+    # Decide morning vs interval based on time of day
+    morning_time = wa_cfg.get('morning_time', '08:00')
+    try:
+        mh, mm = morning_time.split(':')
+        morning_hour, morning_min = int(mh), int(mm)
+    except ValueError:
+        morning_hour, morning_min = 8, 0
+
+    now = datetime.now()
+    last_morning = bot_state.get('last_morning_notify')
+
+    # Send morning digest if:
+    #   - We haven't sent one today yet, OR
+    #   - It's within 2 hours after the configured morning time
+    is_morning = False
+    if last_morning:
+        try:
+            last_dt = datetime.fromisoformat(last_morning)
+            if last_dt.date() < now.date():
+                is_morning = True  # Haven't sent one today
+        except (ValueError, TypeError):
+            is_morning = True
+    else:
+        is_morning = True  # Never sent one
+
+    # Also count as morning if we're within a reasonable window
+    morning_start = now.replace(hour=morning_hour, minute=morning_min, second=0)
+    morning_end = morning_start + timedelta(hours=2)
+    if morning_start <= now <= morning_end:
+        is_morning = True
+
+    if is_morning:
+        logger.info("Running as morning digest.")
+        action_morning_notify(db_path, bot_state)
+    else:
+        logger.info("Running as interval alert.")
+        action_interval_notify(db_path, bot_state)
+
+    logger.info("Single-shot run complete.")
+
+
+# ─── Systemd service installer ───
+
+def install_systemd_service(config_path=None):
+    """Install systemd user service + timer for the WhatsApp bot.
+
+    Creates:
+      ~/.config/systemd/user/nhsjobsearch-bot.service  (oneshot)
+      ~/.config/systemd/user/nhsjobsearch-bot.timer     (periodic, Persistent=true)
+
+    The timer fires every interval_hours. Persistent=true means missed
+    runs (laptop was asleep) fire immediately on wake.
+    """
+    import shutil
+
+    if config_path is None:
+        config_path = "~/.config/nhs-job-search/config.ini"
+    config.init_config(config_path)
+    _ensure_whatsapp_config()
+
+    wa_cfg = config.CONFIG['WHATSAPP']
+    interval_hours = int(wa_cfg.get('interval_hours', '6'))
+
+    # Find the nhsjobsearch executable
+    exe = shutil.which('nhsjobsearch')
+    if not exe:
+        # Fallback: use python -m
+        import sys
+        exe = f"{sys.executable} -m nhsjobsearch"
+
+    abs_config = os.path.abspath(os.path.expanduser(config_path))
+
+    systemd_dir = os.path.expanduser('~/.config/systemd/user')
+    os.makedirs(systemd_dir, exist_ok=True)
+
+    service_path = os.path.join(systemd_dir, 'nhsjobsearch-bot.service')
+    timer_path = os.path.join(systemd_dir, 'nhsjobsearch-bot.timer')
+
+    # Service unit (oneshot — runs once per timer trigger)
+    service_content = f"""\
+[Unit]
+Description=NHS Job Search — reindex and notify
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart={exe} --bot-once --config {abs_config}
+Environment=HOME={os.path.expanduser('~')}
+
+[Install]
+WantedBy=default.target
+"""
+
+    # Timer unit
+    timer_content = f"""\
+[Unit]
+Description=NHS Job Search — periodic reindex timer
+
+[Timer]
+OnCalendar=*-*-* 0/{interval_hours}:00:00
+Persistent=true
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target
+"""
+
+    # Write files
+    with open(service_path, 'w') as f:
+        f.write(service_content)
+    with open(timer_path, 'w') as f:
+        f.write(timer_content)
+
+    print(f"✓ Created {service_path}")
+    print(f"✓ Created {timer_path}")
+
+    # Enable and start
+    ret = os.system('systemctl --user daemon-reload')
+    if ret != 0:
+        print("\n⚠ Could not reload systemd. Run manually:")
+        print("  systemctl --user daemon-reload")
+        print(f"  systemctl --user enable --now nhsjobsearch-bot.timer")
+        return
+
+    ret = os.system('systemctl --user enable --now nhsjobsearch-bot.timer')
+    if ret == 0:
+        print(f"\n✓ Timer enabled! Runs every {interval_hours}h with catch-up on wake.")
+        print(f"  Persistent=true means missed runs fire immediately on resume.")
+        print(f"\nUseful commands:")
+        print(f"  systemctl --user status nhsjobsearch-bot.timer   # Check timer")
+        print(f"  systemctl --user status nhsjobsearch-bot.service # Check last run")
+        print(f"  systemctl --user list-timers                     # All timers")
+        print(f"  journalctl --user -u nhsjobsearch-bot -f         # Follow logs")
+    else:
+        print("\n⚠ Could not enable timer. Run manually:")
+        print(f"  systemctl --user enable --now nhsjobsearch-bot.timer")
+
+    # Ensure lingering is enabled (so user timers run without login session)
+    ret = os.system('loginctl enable-linger 2>/dev/null')
+    if ret == 0:
+        print(f"\n✓ Lingering enabled (timers survive logout).")
+    else:
+        print(f"\n⚠ Could not enable lingering. Timers may stop on logout.")
+        print(f"  Run: sudo loginctl enable-linger {os.environ.get('USER', '$USER')}")
+
+
+def uninstall_systemd_service():
+    """Remove the systemd user service and timer."""
+    systemd_dir = os.path.expanduser('~/.config/systemd/user')
+    service_path = os.path.join(systemd_dir, 'nhsjobsearch-bot.service')
+    timer_path = os.path.join(systemd_dir, 'nhsjobsearch-bot.timer')
+
+    os.system('systemctl --user stop nhsjobsearch-bot.timer 2>/dev/null')
+    os.system('systemctl --user disable nhsjobsearch-bot.timer 2>/dev/null')
+
+    removed = False
+    for path in (service_path, timer_path):
+        if os.path.exists(path):
+            os.unlink(path)
+            print(f"✓ Removed {path}")
+            removed = True
+
+    if removed:
+        os.system('systemctl --user daemon-reload')
+        print("✓ Timer stopped and removed.")
+    else:
+        print("No systemd units found. Nothing to remove.")
 
 def _ensure_whatsapp_config():
     """Ensure [WHATSAPP] section exists with defaults."""
@@ -602,12 +797,20 @@ def main():
                         help='Force send morning digest now')
     parser.add_argument('--reindex-and-notify', action='store_true',
                         help='Reindex then send digest (useful for testing)')
+    parser.add_argument('--once', action='store_true',
+                        help='Single-shot: reindex + smart notify (for systemd/cron)')
+    parser.add_argument('--install', action='store_true',
+                        help='Install systemd user timer (Persistent=true)')
+    parser.add_argument('--uninstall', action='store_true',
+                        help='Remove systemd user timer')
     args = parser.parse_args()
 
     if args.test:
         send_test_message(args.config)
     elif args.digest_now:
         send_digest_now(args.config)
+    elif args.once:
+        run_once(args.config)
     elif args.reindex_and_notify:
         config.init_config(args.config)
         _ensure_whatsapp_config()
@@ -617,6 +820,10 @@ def main():
         bot_state = BotState(os.path.join(cache_dir, 'whatsapp_state.json'))
         action_reindex(db_path, bot_state)
         action_morning_notify(db_path, bot_state)
+    elif args.install:
+        install_systemd_service(args.config)
+    elif args.uninstall:
+        uninstall_systemd_service()
     else:
         run_bot(args.config)
 
